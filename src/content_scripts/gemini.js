@@ -881,6 +881,7 @@ ${code}\n\
       this.detectionText = null;
       this.retryEvaluationTimer = null;
       this.lastDetectionSampleAt = 0;
+      this.completionPending = false;
       this.enabled = true;
       this.observer = null;
     }
@@ -1009,7 +1010,7 @@ ${code}\n\
       widget.appendChild(label);
 
       const detection = document.createElement('span');
-      detection.textContent = 'S:0 M:0';
+      detection.textContent = 'S:0 M:0 Seen:0 P:0';
       Object.assign(detection.style, {
         fontSize: '11px',
         opacity: '0.75'
@@ -1047,7 +1048,8 @@ ${code}\n\
       const stop = state?.hasStop ? '1' : '0';
       const mic = state?.hasMic ? '1' : '0';
       const seen = this.sawStopSinceLastExport ? '1' : '0';
-      this.detectionText.textContent = `S:${stop} M:${mic} Seen:${seen}`;
+      const pending = this.completionPending ? '1' : '0';
+      this.detectionText.textContent = `S:${stop} M:${mic} Seen:${seen} P:${pending}`;
     }
 
     _setWidgetState(state) {
@@ -1103,12 +1105,15 @@ ${code}\n\
           this.stableMicSamples = 0;
         }
 
-        const transitionedStopToMic =
+        const transitionedStopToNotStop =
           previousState.hasStop &&
-          !currentState.hasStop &&
-          currentState.hasMic;
+          !currentState.hasStop;
 
-        if (transitionedStopToMic || this.stableMicSamples >= 3) {
+        if (transitionedStopToNotStop) {
+          this.completionPending = true;
+        }
+
+        if (transitionedStopToNotStop || this.stableMicSamples >= 3) {
           this._scheduleGenerationCompletionEvaluation();
         }
 
@@ -1179,7 +1184,7 @@ ${code}\n\
       }
 
       const turnCount = this._getCurrentTurnCount();
-      if (!force && !this.sawStopSinceLastExport) {
+      if (!force && !this.sawStopSinceLastExport && !this.completionPending) {
         return;
       }
       if (this.state.baselineTurns === null) {
@@ -1234,6 +1239,7 @@ ${code}\n\
         this.state.nextIndex += 1;
         this.sawStopSinceLastExport = false;
         this.stableMicSamples = 0;
+        this.completionPending = false;
         this.state.baselineTurns = Math.max(this.state.baselineTurns || 0, turns.length);
         this._saveState();
         this._setWidgetState('downloaded');
