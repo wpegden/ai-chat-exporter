@@ -61,6 +61,12 @@
   // UTILITY SERVICES
   // ============================================================================
   
+
+  function isExtensionContextInvalidatedError(error) {
+    const message = String(error?.message || error || '');
+    return message.includes('Extension context invalidated');
+  }
+
   class DateUtils {
     static getDateString() {
       const d = new Date();
@@ -892,21 +898,32 @@ ${code}\n\
       try {
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync) {
           chrome.storage.sync.get([CONFIG.AUTOSAVE_ENABLED_STORAGE_KEY], (result) => {
-            if (chrome.runtime?.lastError) {
+            try {
+              if (chrome.runtime?.lastError) {
+              this.enabled = true;
+              this._updateWidgetLabel();
+                onReady();
+                return;
+              }
+
+              this.enabled = result?.[CONFIG.AUTOSAVE_ENABLED_STORAGE_KEY] !== false;
+              this._updateWidgetLabel();
+              onReady();
+            } catch (callbackError) {
+              if (!isExtensionContextInvalidatedError(callbackError)) {
+                console.error('Autosave settings read failed:', callbackError);
+              }
               this.enabled = true;
               this._updateWidgetLabel();
               onReady();
-              return;
             }
-
-            this.enabled = result?.[CONFIG.AUTOSAVE_ENABLED_STORAGE_KEY] !== false;
-            this._updateWidgetLabel();
-            onReady();
           });
           return;
         }
       } catch (e) {
-        console.error('Autosave settings read failed:', e);
+        if (!isExtensionContextInvalidatedError(e)) {
+          console.error('Autosave settings read failed:', e);
+        }
       }
 
       this.enabled = true;
@@ -1301,12 +1318,18 @@ ${code}\n\
           if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.sync) return;
 
           chrome.storage.sync.get(['hideExportBtn'], (result) => {
-            if (chrome.runtime?.lastError) return;
-            if (!this.button?.isConnected) return;
-            this.button.style.display = result?.hideExportBtn ? 'none' : '';
+            try {
+              if (chrome.runtime?.lastError) return;
+              if (!this.button?.isConnected) return;
+              this.button.style.display = result?.hideExportBtn ? 'none' : '';
+            } catch (callbackError) {
+              if (!isExtensionContextInvalidatedError(callbackError)) {
+                console.error('Storage access error:', callbackError);
+              }
+            }
           });
         } catch (e) {
-          if (!String(e?.message || '').includes('Extension context invalidated')) {
+          if (!isExtensionContextInvalidatedError(e)) {
             console.error('Storage access error:', e);
           }
         }
