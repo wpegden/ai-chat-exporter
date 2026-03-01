@@ -876,6 +876,10 @@ ${code}\n\
       this.mutationDebounceTimer = null;
       this.generationCompleteTimer = null;
       this.lastComposerState = { hasStop: false, hasMic: false };
+      this.sawStopSinceLastExport = false;
+      this.stableMicSamples = 0;
+      this.detectionText = null;
+      this.retryEvaluationTimer = null;
       this.enabled = true;
       this.observer = null;
     }
@@ -887,6 +891,7 @@ ${code}\n\
       this.state = this._loadState();
       this._injectWidget();
       this.lastComposerState = this._getComposerState();
+      this._updateDetectionIndicators(this.lastComposerState);
       this._loadEnabledSetting(() => {
         this._setWidgetState('waiting');
         this._observeDom();
@@ -1002,6 +1007,14 @@ ${code}\n\
       label.textContent = 'Autosave: waiting';
       widget.appendChild(label);
 
+      const detection = document.createElement('span');
+      detection.textContent = 'S:0 M:0';
+      Object.assign(detection.style, {
+        fontSize: '11px',
+        opacity: '0.75'
+      });
+      widget.appendChild(detection);
+
       const forceBtn = document.createElement('button');
       forceBtn.type = 'button';
       forceBtn.textContent = 'Force';
@@ -1022,8 +1035,18 @@ ${code}\n\
 
       this.widget = widget;
       this.statusText = label;
+      this.detectionText = detection;
       this.forceButton = forceBtn;
       this._updateWidgetLabel();
+    }
+
+
+    _updateDetectionIndicators(state) {
+      if (!this.detectionText) return;
+      const stop = state?.hasStop ? '1' : '0';
+      const mic = state?.hasMic ? '1' : '0';
+      const seen = this.sawStopSinceLastExport ? '1' : '0';
+      this.detectionText.textContent = `S:${stop} M:${mic} Seen:${seen}`;
     }
 
     _setWidgetState(state) {
@@ -1060,13 +1083,25 @@ ${code}\n\
 
         const previousState = this.lastComposerState;
         const currentState = this._getComposerState();
+        this._updateDetectionIndicators(currentState);
+
+        if (currentState.hasStop) {
+          this.sawStopSinceLastExport = true;
+          this.stableMicSamples = 0;
+        }
+
+        if (this.sawStopSinceLastExport && !currentState.hasStop && currentState.hasMic) {
+          this.stableMicSamples += 1;
+        } else {
+          this.stableMicSamples = 0;
+        }
 
         const transitionedStopToMic =
           previousState.hasStop &&
           !currentState.hasStop &&
           currentState.hasMic;
 
-        if (transitionedStopToMic) {
+        if (transitionedStopToMic || this.stableMicSamples >= 3) {
           this._scheduleGenerationCompletionEvaluation();
         }
 
@@ -1145,6 +1180,9 @@ ${code}\n\
       }
 
       const turnCount = this._getCurrentTurnCount();
+      if (!force && !this.sawStopSinceLastExport) {
+        return;
+      }
       if (this.state.baselineTurns === null) {
         this.state.baselineTurns = turnCount;
         this._saveState();
@@ -1166,6 +1204,12 @@ ${code}\n\
         }
 
         if (!force && turns.length <= this.state.baselineTurns) {
+          if (!this.retryEvaluationTimer) {
+            this.retryEvaluationTimer = setTimeout(() => {
+              this.retryEvaluationTimer = null;
+              this._evaluateForExport();
+            }, 1500);
+          }
           return;
         }
 
@@ -1183,6 +1227,8 @@ ${code}\n\
 
         this.state.lastHash = hash;
         this.state.nextIndex += 1;
+        this.sawStopSinceLastExport = false;
+        this.stableMicSamples = 0;
         this.state.baselineTurns = Math.max(this.state.baselineTurns || 0, turns.length);
         this._saveState();
         this._setWidgetState('downloaded');
