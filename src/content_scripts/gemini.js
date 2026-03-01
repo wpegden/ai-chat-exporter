@@ -1236,7 +1236,7 @@ ${code}\n\
       this.exportInProgress = true;
 
       try {
-        const { markdown, turns, conversationTitle } = await this.exportService.buildFullSnapshotMarkdown();
+        const { markdown, turns } = await this.exportService.buildFullSnapshotMarkdown();
         if (!markdown || !turns.length) {
           this._setWidgetState('notDownloaded');
           return;
@@ -1249,24 +1249,20 @@ ${code}\n\
           return;
         }
 
-        const baseTitle = this._getOrCreateBaseTitle(conversationTitle);
-        const sequence = String(this.state.nextIndex).padStart(2, '0');
-        const filename = `${baseTitle}-${sequence}`;
-
-        // Trigger the same export pipeline as the blue "Export Chat" flow.
+        // Trigger the exact same export path as the blue "Export Chat" flow,
+        // including its default filename generation behavior.
         this.exportService.checkboxManager.injectCheckboxes();
         document.querySelectorAll(`.${CONFIG.CHECKBOX_CLASS}`).forEach(cb => {
           cb.checked = true;
         });
 
         try {
-          await this.exportService.execute('file', filename);
+          await this.exportService.execute('file', '');
         } finally {
           this.exportService.checkboxManager.removeAll();
         }
 
         this.state.lastHash = hash;
-        this.state.nextIndex += 1;
         this.completionPending = false;
         this.state.baselineTurns = Math.max(this.state.baselineTurns || 0, turns.length);
         this._saveState();
