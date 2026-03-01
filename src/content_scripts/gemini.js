@@ -1231,11 +1231,21 @@ ${code}\n\
         const sequence = String(this.state.nextIndex).padStart(2, '0');
         const filename = `${baseTitle}-${sequence}`;
 
-        FileExportService.downloadMarkdown(markdown, filename);
+        // Trigger the same export pipeline as the blue "Export Chat" flow.
+        this.exportService.checkboxManager.injectCheckboxes();
+        document.querySelectorAll(`.${CONFIG.CHECKBOX_CLASS}`).forEach(cb => {
+          cb.checked = true;
+        });
+
+        try {
+          await this.exportService.execute('file', filename);
+        } finally {
+          this.exportService.checkboxManager.removeAll();
+        }
 
         this.state.lastHash = hash;
         this.state.nextIndex += 1;
-            this.completionPending = false;
+        this.completionPending = false;
         this.state.baselineTurns = Math.max(this.state.baselineTurns || 0, turns.length);
         this._saveState();
         this._setWidgetState('downloaded');
