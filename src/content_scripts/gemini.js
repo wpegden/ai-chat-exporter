@@ -869,7 +869,7 @@ ${code}\n\
       this.forceButton = null;
       this.mutationDebounceTimer = null;
       this.generationCompleteTimer = null;
-      this.wasGenerating = false;
+      this.lastComposerState = { hasStop: false, hasMic: false };
       this.enabled = true;
       this.observer = null;
     }
@@ -880,6 +880,7 @@ ${code}\n\
       this.stateKey = this._buildStateKey();
       this.state = this._loadState();
       this._injectWidget();
+      this.lastComposerState = this._getComposerState();
       this._loadEnabledSetting(() => {
         this._setWidgetState('waiting');
         this._observeDom();
@@ -1033,19 +1034,26 @@ ${code}\n\
       this.observer = new MutationObserver(() => {
         this._scheduleMutationEvaluation();
 
-        const generating = this._isGenerationOngoing();
-        if (this.wasGenerating && !generating) {
+        const previousState = this.lastComposerState;
+        const currentState = this._getComposerState();
+
+        const transitionedStopToMic =
+          previousState.hasStop &&
+          !currentState.hasStop &&
+          currentState.hasMic;
+
+        if (transitionedStopToMic) {
           this._scheduleGenerationCompletionEvaluation();
         }
 
-        this.wasGenerating = generating;
+        this.lastComposerState = currentState;
       });
 
       this.observer.observe(document.body, {
         childList: true,
         subtree: true,
         attributes: true,
-        attributeFilter: ['aria-busy', 'class']
+        attributeFilter: ['aria-label', 'data-mat-icon-name', 'fonticon', 'class']
       });
     }
 
@@ -1067,23 +1075,30 @@ ${code}\n\
       return document.querySelectorAll(CONFIG.SELECTORS.CONVERSATION_TURN).length;
     }
 
+    _getComposerState() {
+      const stopIconSelector = [
+        'button mat-icon[fonticon="stop"]',
+        'button mat-icon[fonticon="stop_circle"]',
+        'button mat-icon[data-mat-icon-name="stop"]',
+        'button mat-icon[data-mat-icon-name="stop_circle"]',
+        'button[aria-label*="Stop" i] mat-icon',
+        'button[mattooltip*="Stop" i] mat-icon'
+      ].join(', ');
+
+      const micIconSelector = [
+        'button mat-icon[fonticon="mic"]',
+        'button mat-icon[data-mat-icon-name="mic"]',
+        'button[aria-label*="Microphone" i] mat-icon'
+      ].join(', ');
+
+      return {
+        hasStop: !!document.querySelector(stopIconSelector),
+        hasMic: !!document.querySelector(micIconSelector)
+      };
+    }
+
     _isGenerationOngoing() {
-      const stopSelectors = [
-        'button[aria-label*="Stop" i]',
-        'button[aria-label*="Stop generating" i]',
-        'button[mattooltip*="Stop" i]',
-        '[data-test-id*="stop" i]'
-      ];
-
-      if (stopSelectors.some(selector => document.querySelector(selector))) {
-        return true;
-      }
-
-      const busyNode = document.querySelector('[aria-busy="true"]');
-      if (busyNode) return true;
-
-      const progressNode = document.querySelector('[role="progressbar"], mat-progress-bar, .loading, .spinner');
-      return !!progressNode;
+      return this._getComposerState().hasStop;
     }
 
     _getOrCreateBaseTitle(currentTitle) {
