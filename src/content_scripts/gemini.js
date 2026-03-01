@@ -880,6 +880,7 @@ ${code}\n\
       this.stableMicSamples = 0;
       this.detectionText = null;
       this.retryEvaluationTimer = null;
+      this.lastDetectionSampleAt = 0;
       this.enabled = true;
       this.observer = null;
     }
@@ -1081,6 +1082,12 @@ ${code}\n\
       this.observer = new MutationObserver(() => {
         this._scheduleMutationEvaluation();
 
+        const now = Date.now();
+        if (now - this.lastDetectionSampleAt < 120) {
+          return;
+        }
+        this.lastDetectionSampleAt = now;
+
         const previousState = this.lastComposerState;
         const currentState = this._getComposerState();
         this._updateDetectionIndicators(currentState);
@@ -1135,25 +1142,17 @@ ${code}\n\
     }
 
     _getComposerState() {
-      const stopIconSelector = [
-        'button mat-icon[fonticon="stop"]',
-        'button mat-icon[fonticon="stop_circle"]',
-        'button mat-icon[data-mat-icon-name="stop"]',
-        'button mat-icon[data-mat-icon-name="stop_circle"]',
-        'button[aria-label*="Stop" i] mat-icon',
-        'button[mattooltip*="Stop" i] mat-icon'
-      ].join(', ');
+      const stopButtonByLabel = document.querySelector('button[aria-label*="Stop" i], button[mattooltip*="Stop" i]');
+      const stopIcon = document.querySelector('mat-icon[fonticon="stop"], mat-icon[fonticon="stop_circle"], mat-icon[data-mat-icon-name="stop"], mat-icon[data-mat-icon-name="stop_circle"]');
+      const stopButtonByIcon = stopIcon?.closest('button');
 
-      const micButtonSelector = [
-        'button[aria-label*="Microphone" i]',
-        'button[mattooltip*="Microphone" i]',
-        'button:has(mat-icon[fonticon="mic"])',
-        'button:has(mat-icon[data-mat-icon-name="mic"])'
-      ].join(', ');
+      const micButtonByLabel = document.querySelector('button[aria-label*="Microphone" i], button[mattooltip*="Microphone" i]');
+      const micIcon = document.querySelector('mat-icon[fonticon="mic"], mat-icon[data-mat-icon-name="mic"]');
+      const micButtonByIcon = micIcon?.closest('button');
 
       return {
-        hasStop: !!document.querySelector(stopIconSelector),
-        hasMic: !!document.querySelector(micButtonSelector)
+        hasStop: !!stopButtonByLabel || !!stopButtonByIcon,
+        hasMic: !!micButtonByLabel || !!micButtonByIcon
       };
     }
 
