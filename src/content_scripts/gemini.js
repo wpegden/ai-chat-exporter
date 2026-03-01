@@ -875,7 +875,7 @@ ${code}\n\
       this.forceButton = null;
       this.mutationDebounceTimer = null;
       this.generationCompleteTimer = null;
-      this.lastComposerState = { hasStop: false, hasMic: false, hasSendButton: false };
+      this.lastComposerState = { hasStop: false, hasMic: false };
       this.enabled = true;
       this.observer = null;
     }
@@ -1061,12 +1061,12 @@ ${code}\n\
         const previousState = this.lastComposerState;
         const currentState = this._getComposerState();
 
-        const transitionedStopToIdleComposer =
+        const transitionedStopToMic =
           previousState.hasStop &&
           !currentState.hasStop &&
-          (currentState.hasMic || currentState.hasSendButton);
+          currentState.hasMic;
 
-        if (transitionedStopToIdleComposer) {
+        if (transitionedStopToMic) {
           this._scheduleGenerationCompletionEvaluation();
         }
 
@@ -1109,18 +1109,16 @@ ${code}\n\
         'button[mattooltip*="Stop" i] mat-icon'
       ].join(', ');
 
-      const micIconSelector = [
-        'button mat-icon[fonticon="mic"]',
-        'button mat-icon[data-mat-icon-name="mic"]',
-        'button[aria-label*="Microphone" i] mat-icon'
+      const micButtonSelector = [
+        'button[aria-label*="Microphone" i]',
+        'button[mattooltip*="Microphone" i]',
+        'button:has(mat-icon[fonticon="mic"])',
+        'button:has(mat-icon[data-mat-icon-name="mic"])'
       ].join(', ');
-
-      const sendButton = document.querySelector('button[aria-label*="Send" i], button[mattooltip*="Send" i]');
 
       return {
         hasStop: !!document.querySelector(stopIconSelector),
-        hasMic: !!document.querySelector(micIconSelector),
-        hasSendButton: !!sendButton
+        hasMic: !!document.querySelector(micButtonSelector)
       };
     }
 
