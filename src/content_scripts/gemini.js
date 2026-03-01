@@ -14,6 +14,7 @@
     SELECT_DROPDOWN_ID: 'gemini-select-dropdown',
     CHECKBOX_CLASS: 'gemini-export-checkbox',
     EXPORT_MODE_NAME: 'gemini-export-mode',
+    AUTOSAVE_WIDGET_ID: 'gemini-autosave-widget',
     
     SELECTORS: {
       CHAT_CONTAINER: '[data-test-id="chat-history-container"]',
@@ -30,7 +31,9 @@
       POPUP_DURATION: 900,
       NOTIFICATION_CLEANUP_DELAY: 1000,
       MAX_SCROLL_ATTEMPTS: 60,
-      MAX_STABLE_SCROLLS: 4
+      MAX_STABLE_SCROLLS: 4,
+      AUTOSAVE_MUTATION_DEBOUNCE: 1600,
+      AUTOSAVE_GENERATION_COMPLETE_DEBOUNCE: 1200
     },
     
     STYLES: {
@@ -49,7 +52,9 @@
     
     DEFAULT_FILENAME: 'gemini_chat_export',
     MARKDOWN_HEADER: '# Gemini Chat Export',
-    EXPORT_TIMESTAMP_FORMAT: 'Exported on:'
+    EXPORT_TIMESTAMP_FORMAT: 'Exported on:',
+    AUTOSAVE_STATE_PREFIX: 'ai_chat_exporter_autosave_state:',
+    AUTOSAVE_ENABLED_STORAGE_KEY: 'geminiAutosaveEnabled'
   };
 
   // ============================================================================
@@ -772,7 +777,8 @@ ${code}\n\
       return `# ${title}\n\n> ${CONFIG.EXPORT_TIMESTAMP_FORMAT} ${timestamp}\n\n---\n\n`;
     }
 
-    async buildMarkdown(turns, conversationTitle) {
+    async buildMarkdown(turns, conversationTitle, options = {}) {
+      const includeAll = !!options.includeAll;
       let markdown = this._buildMarkdownHeader(conversationTitle);
 
       for (let i = 0; i < turns.length; i++) {
@@ -783,7 +789,7 @@ ${code}\n\
         const userQueryElem = turn.querySelector(CONFIG.SELECTORS.USER_QUERY);
         if (userQueryElem) {
           const cb = userQueryElem.querySelector(`.${CONFIG.CHECKBOX_CLASS}`);
-          if (cb?.checked) {
+          if (includeAll || cb?.checked) {
             const userQuery = this.markdownConverter.extractUserQuery(userQueryElem);
             if (userQuery) {
               markdown += `## 👤 You\n\n${userQuery}\n\n`;
@@ -795,7 +801,7 @@ ${code}\n\
         const modelRespElem = turn.querySelector(CONFIG.SELECTORS.MODEL_RESPONSE);
         if (modelRespElem) {
           const cb = modelRespElem.querySelector(`.${CONFIG.CHECKBOX_CLASS}`);
-          if (cb?.checked) {
+          if (includeAll || cb?.checked) {
             const modelResponse = this.markdownConverter.extractModelResponse(modelRespElem);
             if (modelResponse) {
               markdown += `## 🤖 Gemini\n\n${modelResponse}\n\n`;
@@ -809,6 +815,14 @@ ${code}\n\
       }
 
       return markdown;
+    }
+
+    async buildFullSnapshotMarkdown() {
+      await ScrollService.loadAllMessages();
+      const turns = Array.from(document.querySelectorAll(CONFIG.SELECTORS.CONVERSATION_TURN));
+      const conversationTitle = FilenameService.getConversationTitle();
+      const markdown = await this.buildMarkdown(turns, conversationTitle, { includeAll: true });
+      return { markdown, turns, conversationTitle };
     }
 
     async execute(exportMode, customFilename) {
@@ -845,6 +859,300 @@ ${code}\n\
     }
   }
 
+  class GeminiAutosaveService {
+    constructor(exportService) {
+      this.exportService = exportService;
+      this.state = null;
+      this.stateKey = null;
+      this.widget = null;
+      this.statusText = null;
+      this.forceButton = null;
+      this.mutationDebounceTimer = null;
+      this.generationCompleteTimer = null;
+      this.wasGenerating = false;
+      this.enabled = true;
+      this.observer = null;
+    }
+
+    init() {
+      if (location.hostname !== 'gemini.google.com') return;
+
+      this.stateKey = this._buildStateKey();
+      this.state = this._loadState();
+      this._injectWidget();
+      this._loadEnabledSetting(() => {
+        this._setWidgetState('waiting');
+        this._observeDom();
+        this._scheduleMutationEvaluation();
+      });
+    }
+
+    _loadEnabledSetting(onReady) {
+      try {
+        if (chrome?.storage?.sync) {
+          chrome.storage.sync.get([CONFIG.AUTOSAVE_ENABLED_STORAGE_KEY], (result) => {
+            this.enabled = result[CONFIG.AUTOSAVE_ENABLED_STORAGE_KEY] !== false;
+            this._updateWidgetLabel();
+            onReady();
+          });
+          return;
+        }
+      } catch (e) {
+        console.error('Autosave settings read failed:', e);
+      }
+
+      this.enabled = true;
+      this._updateWidgetLabel();
+      onReady();
+    }
+
+    _buildStateKey() {
+      const pathMatch = location.pathname.match(/^\/app\/([^/?#]+)/);
+      const conversationKey = pathMatch?.[1] || location.href;
+      return `${CONFIG.AUTOSAVE_STATE_PREFIX}${conversationKey}`;
+    }
+
+    _loadState() {
+      try {
+        const raw = localStorage.getItem(this.stateKey);
+        if (!raw) {
+          return {
+            baseTitle: '',
+            nextIndex: 1,
+            lastHash: '',
+            baselineTurns: null
+          };
+        }
+
+        const parsed = JSON.parse(raw);
+        return {
+          baseTitle: parsed.baseTitle || '',
+          nextIndex: Number.isInteger(parsed.nextIndex) && parsed.nextIndex > 0 ? parsed.nextIndex : 1,
+          lastHash: parsed.lastHash || '',
+          baselineTurns: Number.isInteger(parsed.baselineTurns) ? parsed.baselineTurns : null
+        };
+      } catch (e) {
+        console.error('Autosave state parse failed:', e);
+        return {
+          baseTitle: '',
+          nextIndex: 1,
+          lastHash: '',
+          baselineTurns: null
+        };
+      }
+    }
+
+    _saveState() {
+      try {
+        localStorage.setItem(this.stateKey, JSON.stringify(this.state));
+      } catch (e) {
+        console.error('Autosave state save failed:', e);
+      }
+    }
+
+    _injectWidget() {
+      if (document.getElementById(CONFIG.AUTOSAVE_WIDGET_ID)) return;
+
+      const widget = document.createElement('div');
+      widget.id = CONFIG.AUTOSAVE_WIDGET_ID;
+      Object.assign(widget.style, {
+        position: 'fixed',
+        left: '16px',
+        bottom: '16px',
+        zIndex: '9999',
+        background: DOMUtils.isDarkMode() ? '#1c1c1c' : '#ffffff',
+        color: DOMUtils.isDarkMode() ? '#f3f3f3' : '#333333',
+        border: `1px solid ${DOMUtils.isDarkMode() ? '#3d3d3d' : '#d0d0d0'}`,
+        borderRadius: '8px',
+        padding: '8px 10px',
+        fontSize: '12px',
+        fontFamily: 'Arial, sans-serif',
+        boxShadow: '0 2px 10px rgba(0,0,0,0.12)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px'
+      });
+
+      const label = document.createElement('span');
+      label.textContent = 'Autosave: waiting';
+      widget.appendChild(label);
+
+      const forceBtn = document.createElement('button');
+      forceBtn.type = 'button';
+      forceBtn.textContent = 'Force';
+      Object.assign(forceBtn.style, {
+        padding: '2px 8px',
+        borderRadius: '6px',
+        border: '1px solid #7b7b7b',
+        background: 'transparent',
+        color: 'inherit',
+        cursor: 'pointer'
+      });
+      forceBtn.addEventListener('click', () => {
+        this._evaluateForExport({ force: true });
+      });
+
+      widget.appendChild(forceBtn);
+      document.body.appendChild(widget);
+
+      this.widget = widget;
+      this.statusText = label;
+      this.forceButton = forceBtn;
+      this._updateWidgetLabel();
+    }
+
+    _setWidgetState(state) {
+      if (!this.statusText) return;
+
+      const labels = {
+        waiting: 'Autosave: waiting',
+        downloaded: 'Autosave: downloaded',
+        notDownloaded: 'Autosave: not downloaded',
+        disabled: 'Autosave: disabled'
+      };
+
+      this.statusText.textContent = labels[state] || labels.waiting;
+    }
+
+    _updateWidgetLabel() {
+      if (!this.enabled) {
+        this._setWidgetState('disabled');
+        return;
+      }
+
+      if (this.state?.lastHash) {
+        this._setWidgetState('downloaded');
+      } else {
+        this._setWidgetState('notDownloaded');
+      }
+    }
+
+    _observeDom() {
+      if (this.observer) this.observer.disconnect();
+
+      this.observer = new MutationObserver(() => {
+        this._scheduleMutationEvaluation();
+
+        const generating = this._isGenerationOngoing();
+        if (this.wasGenerating && !generating) {
+          this._scheduleGenerationCompletionEvaluation();
+        }
+
+        this.wasGenerating = generating;
+      });
+
+      this.observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['aria-busy', 'class']
+      });
+    }
+
+    _scheduleMutationEvaluation() {
+      clearTimeout(this.mutationDebounceTimer);
+      this.mutationDebounceTimer = setTimeout(() => {
+        this._evaluateForExport();
+      }, CONFIG.TIMING.AUTOSAVE_MUTATION_DEBOUNCE);
+    }
+
+    _scheduleGenerationCompletionEvaluation() {
+      clearTimeout(this.generationCompleteTimer);
+      this.generationCompleteTimer = setTimeout(() => {
+        this._evaluateForExport();
+      }, CONFIG.TIMING.AUTOSAVE_GENERATION_COMPLETE_DEBOUNCE);
+    }
+
+    _getCurrentTurnCount() {
+      return document.querySelectorAll(CONFIG.SELECTORS.CONVERSATION_TURN).length;
+    }
+
+    _isGenerationOngoing() {
+      const stopSelectors = [
+        'button[aria-label*="Stop" i]',
+        'button[aria-label*="Stop generating" i]',
+        'button[mattooltip*="Stop" i]',
+        '[data-test-id*="stop" i]'
+      ];
+
+      if (stopSelectors.some(selector => document.querySelector(selector))) {
+        return true;
+      }
+
+      const busyNode = document.querySelector('[aria-busy="true"]');
+      if (busyNode) return true;
+
+      const progressNode = document.querySelector('[role="progressbar"], mat-progress-bar, .loading, .spinner');
+      return !!progressNode;
+    }
+
+    _getOrCreateBaseTitle(currentTitle) {
+      if (this.state.baseTitle) return this.state.baseTitle;
+
+      const sanitized = StringUtils.sanitizeFilename(currentTitle || '') || CONFIG.DEFAULT_FILENAME;
+      this.state.baseTitle = sanitized;
+      this._saveState();
+      return this.state.baseTitle;
+    }
+
+    async _evaluateForExport(options = {}) {
+      const force = !!options.force;
+
+      if (!this.enabled) return;
+      if (!force && this._isGenerationOngoing()) {
+        this._setWidgetState('waiting');
+        return;
+      }
+
+      const turnCount = this._getCurrentTurnCount();
+      if (this.state.baselineTurns === null) {
+        this.state.baselineTurns = turnCount;
+        this._saveState();
+        this._setWidgetState('notDownloaded');
+        return;
+      }
+
+      if (!force && turnCount <= this.state.baselineTurns) {
+        return;
+      }
+
+      this._setWidgetState('waiting');
+
+      try {
+        const { markdown, turns, conversationTitle } = await this.exportService.buildFullSnapshotMarkdown();
+        if (!markdown || !turns.length) {
+          this._setWidgetState('notDownloaded');
+          return;
+        }
+
+        if (!force && turns.length <= this.state.baselineTurns) {
+          return;
+        }
+
+        const hash = `${turns.length}:${markdown.length}`;
+        if (!force && hash === this.state.lastHash) {
+          this._setWidgetState('downloaded');
+          return;
+        }
+
+        const baseTitle = this._getOrCreateBaseTitle(conversationTitle);
+        const sequence = String(this.state.nextIndex).padStart(2, '0');
+        const filename = `${baseTitle}-${sequence}`;
+
+        FileExportService.downloadMarkdown(markdown, filename);
+
+        this.state.lastHash = hash;
+        this.state.nextIndex += 1;
+        this.state.baselineTurns = Math.max(this.state.baselineTurns || 0, turns.length);
+        this._saveState();
+        this._setWidgetState('downloaded');
+      } catch (error) {
+        console.error('Gemini autosave export failed:', error);
+        this._setWidgetState('notDownloaded');
+      }
+    }
+  }
+
   // ============================================================================
   // EXPORT CONTROLLER
   // ============================================================================
@@ -855,12 +1163,14 @@ ${code}\n\
       this.exportService = new ExportService(this.checkboxManager);
       this.button = null;
       this.dropdown = null;
+      this.autosaveService = new GeminiAutosaveService(this.exportService);
     }
 
     init() {
       this.createUI();
       this.attachEventListeners();
       this.observeStorageChanges();
+      this.autosaveService.init();
     }
 
     createUI() {
