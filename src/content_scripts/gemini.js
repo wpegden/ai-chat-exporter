@@ -51,7 +51,7 @@
     MATH_INLINE_SELECTOR: '.math-inline[data-math]',
     
     DEFAULT_FILENAME: 'gemini_chat_export',
-    MARKDOWN_HEADER: '# Gemini Chat Export',
+    MARKDOWN_HEADER: 'Gemini Chat Export',
     EXPORT_TIMESTAMP_FORMAT: 'Exported on:',
     AUTOSAVE_STATE_PREFIX: 'ai_chat_exporter_autosave_state:',
     AUTOSAVE_ENABLED_STORAGE_KEY: 'geminiAutosaveEnabled'
@@ -134,8 +134,32 @@
   
   class FilenameService {
     static getConversationTitle() {
-      const titleCard = document.querySelector(CONFIG.SELECTORS.CONVERSATION_TITLE);
-      return titleCard ? titleCard.textContent.trim() : '';
+      const titleSelectors = [
+        CONFIG.SELECTORS.CONVERSATION_TITLE,
+        'h1',
+        '[data-test-id="conversation-title"]',
+        '[data-test-id="chat-title"]'
+      ];
+
+      for (const selector of titleSelectors) {
+        const titleCard = document.querySelector(selector);
+        const titleText = titleCard?.textContent?.trim();
+        if (titleText && !/^gemini$/i.test(titleText)) {
+          return titleText;
+        }
+      }
+
+      const pageTitle = document.title?.trim() || '';
+      const cleanedPageTitle = pageTitle
+        .replace(/\s*[\-|·•:]\s*Gemini\s*$/i, '')
+        .replace(/^Gemini\s*[\-|·•:]\s*/i, '')
+        .trim();
+
+      if (cleanedPageTitle && !/^gemini$/i.test(cleanedPageTitle)) {
+        return cleanedPageTitle;
+      }
+
+      return '';
     }
 
     static generate(customFilename, conversationTitle) {
