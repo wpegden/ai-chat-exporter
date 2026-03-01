@@ -892,7 +892,14 @@ ${code}\n\
       try {
         if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync) {
           chrome.storage.sync.get([CONFIG.AUTOSAVE_ENABLED_STORAGE_KEY], (result) => {
-            this.enabled = result[CONFIG.AUTOSAVE_ENABLED_STORAGE_KEY] !== false;
+            if (chrome.runtime?.lastError) {
+              this.enabled = true;
+              this._updateWidgetLabel();
+              onReady();
+              return;
+            }
+
+            this.enabled = result?.[CONFIG.AUTOSAVE_ENABLED_STORAGE_KEY] !== false;
             this._updateWidgetLabel();
             onReady();
           });
@@ -1288,20 +1295,21 @@ ${code}\n\
     observeStorageChanges() {
       const updateVisibility = () => {
         try {
-          if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync) {
-            chrome.storage.sync.get(['hideExportBtn'], (result) => {
-              this.button.style.display = result.hideExportBtn ? 'none' : '';
-            });
-          }
+          if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.sync) return;
+
+          chrome.storage.sync.get(['hideExportBtn'], (result) => {
+            if (chrome.runtime?.lastError) return;
+            if (!this.button?.isConnected) return;
+            this.button.style.display = result?.hideExportBtn ? 'none' : '';
+          });
         } catch (e) {
-          console.error('Storage access error:', e);
+          if (!String(e?.message || '').includes('Extension context invalidated')) {
+            console.error('Storage access error:', e);
+          }
         }
       };
 
       updateVisibility();
-
-      const observer = new MutationObserver(updateVisibility);
-      observer.observe(document.body, { childList: true, subtree: true });
 
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
         chrome.storage.onChanged.addListener((changes, area) => {
