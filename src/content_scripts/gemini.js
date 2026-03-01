@@ -134,14 +134,27 @@
   
   class FilenameService {
     static getConversationTitle() {
-      const titleSelectors = [
+      const spanCandidates = Array.from(document.querySelectorAll('span'));
+      for (const span of spanCandidates) {
+        const hasConversationTitleAttribute = Array.from(span.attributes || [])
+          .some(attr => String(attr.value || '').toLowerCase().includes('conversation-title'));
+
+        if (!hasConversationTitleAttribute) continue;
+
+        const titleText = span.textContent?.trim();
+        if (titleText && !/^gemini$/i.test(titleText)) {
+          return titleText;
+        }
+      }
+
+      const fallbackSelectors = [
         CONFIG.SELECTORS.CONVERSATION_TITLE,
-        'h1',
         '[data-test-id="conversation-title"]',
-        '[data-test-id="chat-title"]'
+        '[data-test-id="chat-title"]',
+        'h1'
       ];
 
-      for (const selector of titleSelectors) {
+      for (const selector of fallbackSelectors) {
         const titleCard = document.querySelector(selector);
         const titleText = titleCard?.textContent?.trim();
         if (titleText && !/^gemini$/i.test(titleText)) {
