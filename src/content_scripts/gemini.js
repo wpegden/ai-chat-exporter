@@ -1190,6 +1190,12 @@ ${code}\n\
       }
 
       if (!force && turnCount <= this.state.baselineTurns) {
+        if (!this.retryEvaluationTimer) {
+          this.retryEvaluationTimer = setTimeout(() => {
+            this.retryEvaluationTimer = null;
+            this._evaluateForExport();
+          }, 1500);
+        }
         return;
       }
 
