@@ -919,6 +919,7 @@ ${code}\n\
       this.completionPending = false;
       this.enabled = true;
       this.observer = null;
+      this.exportInProgress = false;
     }
 
     init() {
@@ -1182,11 +1183,30 @@ ${code}\n\
       return this._getComposerState().hasStop;
     }
 
-    _getOrCreateBaseTitle(currentTitle) {
-      if (this.state.baseTitle) return this.state.baseTitle;
+    _isGenericBaseTitle(title) {
+      const normalized = String(title || '').toLowerCase();
+      return !normalized || normalized === 'gemini' || normalized === CONFIG.DEFAULT_FILENAME;
+    }
 
-      const sanitized = StringUtils.sanitizeFilename(currentTitle || '') || CONFIG.DEFAULT_FILENAME;
-      this.state.baseTitle = sanitized;
+    _getOrCreateBaseTitle(currentTitle) {
+      const sanitizedCurrent = StringUtils.sanitizeFilename(currentTitle || '');
+      const hasUsableCurrent = sanitizedCurrent && !this._isGenericBaseTitle(sanitizedCurrent);
+
+      if (this.state.baseTitle && !this._isGenericBaseTitle(this.state.baseTitle)) {
+        return this.state.baseTitle;
+      }
+
+      if (hasUsableCurrent) {
+        this.state.baseTitle = sanitizedCurrent;
+        this._saveState();
+        return this.state.baseTitle;
+      }
+
+      if (this.state.baseTitle) {
+        return this.state.baseTitle;
+      }
+
+      this.state.baseTitle = CONFIG.DEFAULT_FILENAME;
       this._saveState();
       return this.state.baseTitle;
     }
@@ -1195,6 +1215,7 @@ ${code}\n\
       const force = !!options.force;
 
       if (!this.enabled) return;
+      if (this.exportInProgress) return;
       if (!force && this._isGenerationOngoing()) {
         this._setWidgetState('waiting');
         return;
@@ -1212,6 +1233,7 @@ ${code}\n\
       }
 
       this._setWidgetState('waiting');
+      this.exportInProgress = true;
 
       try {
         const { markdown, turns, conversationTitle } = await this.exportService.buildFullSnapshotMarkdown();
@@ -1252,6 +1274,8 @@ ${code}\n\
       } catch (error) {
         console.error('Gemini autosave export failed:', error);
         this._setWidgetState('notDownloaded');
+      } finally {
+        this.exportInProgress = false;
       }
     }
   }
