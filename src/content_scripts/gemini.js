@@ -869,7 +869,7 @@ ${code}\n\
       this.forceButton = null;
       this.mutationDebounceTimer = null;
       this.generationCompleteTimer = null;
-      this.lastComposerState = { hasStop: false, hasMic: false };
+      this.lastComposerState = { hasStop: false, hasMic: false, hasSendButton: false };
       this.enabled = true;
       this.observer = null;
     }
@@ -1044,12 +1044,12 @@ ${code}\n\
         const previousState = this.lastComposerState;
         const currentState = this._getComposerState();
 
-        const transitionedStopToMic =
+        const transitionedStopToIdleComposer =
           previousState.hasStop &&
           !currentState.hasStop &&
-          currentState.hasMic;
+          (currentState.hasMic || currentState.hasSendButton);
 
-        if (transitionedStopToMic) {
+        if (transitionedStopToIdleComposer) {
           this._scheduleGenerationCompletionEvaluation();
         }
 
@@ -1098,9 +1098,12 @@ ${code}\n\
         'button[aria-label*="Microphone" i] mat-icon'
       ].join(', ');
 
+      const sendButton = document.querySelector('button[aria-label*="Send" i], button[mattooltip*="Send" i]');
+
       return {
         hasStop: !!document.querySelector(stopIconSelector),
-        hasMic: !!document.querySelector(micIconSelector)
+        hasMic: !!document.querySelector(micIconSelector),
+        hasSendButton: !!sendButton
       };
     }
 
