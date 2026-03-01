@@ -1092,11 +1092,14 @@ ${code}\n\
 
         const previousState = this.lastComposerState;
         const currentState = this._getComposerState();
-        this._updateDetectionIndicators(currentState);
 
         if (currentState.hasStop) {
           this.sawStopSinceLastExport = true;
           this.stableMicSamples = 0;
+        }
+
+        if (this.sawStopSinceLastExport && !currentState.hasStop) {
+          this.completionPending = true;
         }
 
         if (this.sawStopSinceLastExport && !currentState.hasStop && currentState.hasMic) {
@@ -1105,19 +1108,14 @@ ${code}\n\
           this.stableMicSamples = 0;
         }
 
-        const transitionedStopToNotStop =
-          previousState.hasStop &&
-          !currentState.hasStop;
+        const transitionedStopToNotStop = previousState.hasStop && !currentState.hasStop;
 
-        if (transitionedStopToNotStop) {
-          this.completionPending = true;
-        }
-
-        if (transitionedStopToNotStop || this.stableMicSamples >= 3) {
+        if (transitionedStopToNotStop || this.completionPending || this.stableMicSamples >= 3) {
           this._scheduleGenerationCompletionEvaluation();
         }
 
         this.lastComposerState = currentState;
+        this._updateDetectionIndicators(currentState);
       });
 
       this.observer.observe(document.body, {
