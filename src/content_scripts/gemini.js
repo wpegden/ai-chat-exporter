@@ -51,7 +51,7 @@
     MATH_INLINE_SELECTOR: '.math-inline[data-math]',
     
     DEFAULT_FILENAME: 'gemini_chat_export',
-    MARKDOWN_HEADER: '# Gemini Chat Export',
+    MARKDOWN_HEADER: 'Gemini Chat Export',
     EXPORT_TIMESTAMP_FORMAT: 'Exported on:',
     AUTOSAVE_STATE_PREFIX: 'ai_chat_exporter_autosave_state:',
     AUTOSAVE_ENABLED_STORAGE_KEY: 'geminiAutosaveEnabled'
@@ -134,8 +134,45 @@
   
   class FilenameService {
     static getConversationTitle() {
-      const titleCard = document.querySelector(CONFIG.SELECTORS.CONVERSATION_TITLE);
-      return titleCard ? titleCard.textContent.trim() : '';
+      const spanCandidates = Array.from(document.querySelectorAll('span'));
+      for (const span of spanCandidates) {
+        const hasConversationTitleAttribute = Array.from(span.attributes || [])
+          .some(attr => String(attr.value || '').toLowerCase().includes('conversation-title'));
+
+        if (!hasConversationTitleAttribute) continue;
+
+        const titleText = span.textContent?.trim();
+        if (titleText && !/^gemini$/i.test(titleText)) {
+          return titleText;
+        }
+      }
+
+      const fallbackSelectors = [
+        CONFIG.SELECTORS.CONVERSATION_TITLE,
+        '[data-test-id="conversation-title"]',
+        '[data-test-id="chat-title"]',
+        'h1'
+      ];
+
+      for (const selector of fallbackSelectors) {
+        const titleCard = document.querySelector(selector);
+        const titleText = titleCard?.textContent?.trim();
+        if (titleText && !/^gemini$/i.test(titleText)) {
+          return titleText;
+        }
+      }
+
+      const pageTitle = document.title?.trim() || '';
+      const cleanedPageTitle = pageTitle
+        .replace(/\s*[\-|·•:]\s*Gemini\s*$/i, '')
+        .replace(/^Gemini\s*[\-|·•:]\s*/i, '')
+        .trim();
+
+      if (cleanedPageTitle && !/^gemini$/i.test(cleanedPageTitle)) {
+        return cleanedPageTitle;
+      }
+
+      return '';
     }
 
     static generate(customFilename, conversationTitle) {
@@ -882,6 +919,7 @@ ${code}\n\
       this.completionPending = false;
       this.enabled = true;
       this.observer = null;
+      this.exportInProgress = false;
     }
 
     init() {
@@ -1145,11 +1183,30 @@ ${code}\n\
       return this._getComposerState().hasStop;
     }
 
-    _getOrCreateBaseTitle(currentTitle) {
-      if (this.state.baseTitle) return this.state.baseTitle;
+    _isGenericBaseTitle(title) {
+      const normalized = String(title || '').toLowerCase();
+      return !normalized || normalized === 'gemini' || normalized === CONFIG.DEFAULT_FILENAME;
+    }
 
-      const sanitized = StringUtils.sanitizeFilename(currentTitle || '') || CONFIG.DEFAULT_FILENAME;
-      this.state.baseTitle = sanitized;
+    _getOrCreateBaseTitle(currentTitle) {
+      const sanitizedCurrent = StringUtils.sanitizeFilename(currentTitle || '');
+      const hasUsableCurrent = sanitizedCurrent && !this._isGenericBaseTitle(sanitizedCurrent);
+
+      if (this.state.baseTitle && !this._isGenericBaseTitle(this.state.baseTitle)) {
+        return this.state.baseTitle;
+      }
+
+      if (hasUsableCurrent) {
+        this.state.baseTitle = sanitizedCurrent;
+        this._saveState();
+        return this.state.baseTitle;
+      }
+
+      if (this.state.baseTitle) {
+        return this.state.baseTitle;
+      }
+
+      this.state.baseTitle = CONFIG.DEFAULT_FILENAME;
       this._saveState();
       return this.state.baseTitle;
     }
@@ -1158,6 +1215,7 @@ ${code}\n\
       const force = !!options.force;
 
       if (!this.enabled) return;
+      if (this.exportInProgress) return;
       if (!force && this._isGenerationOngoing()) {
         this._setWidgetState('waiting');
         return;
@@ -1175,9 +1233,10 @@ ${code}\n\
       }
 
       this._setWidgetState('waiting');
+      this.exportInProgress = true;
 
       try {
-        const { markdown, turns, conversationTitle } = await this.exportService.buildFullSnapshotMarkdown();
+        const { markdown, turns } = await this.exportService.buildFullSnapshotMarkdown();
         if (!markdown || !turns.length) {
           this._setWidgetState('notDownloaded');
           return;
@@ -1190,21 +1249,29 @@ ${code}\n\
           return;
         }
 
-        const baseTitle = this._getOrCreateBaseTitle(conversationTitle);
-        const sequence = String(this.state.nextIndex).padStart(2, '0');
-        const filename = `${baseTitle}-${sequence}`;
+        // Trigger the exact same export path as the blue "Export Chat" flow,
+        // including its default filename generation behavior.
+        this.exportService.checkboxManager.injectCheckboxes();
+        document.querySelectorAll(`.${CONFIG.CHECKBOX_CLASS}`).forEach(cb => {
+          cb.checked = true;
+        });
 
-        FileExportService.downloadMarkdown(markdown, filename);
+        try {
+          await this.exportService.execute('file', '');
+        } finally {
+          this.exportService.checkboxManager.removeAll();
+        }
 
         this.state.lastHash = hash;
-        this.state.nextIndex += 1;
-            this.completionPending = false;
+        this.completionPending = false;
         this.state.baselineTurns = Math.max(this.state.baselineTurns || 0, turns.length);
         this._saveState();
         this._setWidgetState('downloaded');
       } catch (error) {
         console.error('Gemini autosave export failed:', error);
         this._setWidgetState('notDownloaded');
+      } finally {
+        this.exportInProgress = false;
       }
     }
   }
