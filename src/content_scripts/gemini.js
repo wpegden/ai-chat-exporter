@@ -54,7 +54,9 @@
     MARKDOWN_HEADER: 'Gemini Chat Export',
     EXPORT_TIMESTAMP_FORMAT: 'Exported on:',
     AUTOSAVE_STATE_PREFIX: 'ai_chat_exporter_autosave_state:',
-    AUTOSAVE_ENABLED_STORAGE_KEY: 'geminiAutosaveEnabled'
+    AUTOSAVE_ENABLED_STORAGE_KEY: 'geminiAutosaveEnabled',
+    AUTOSAVE_RUN_MESSAGE_TYPE: 'RUN_AUTOSAVE_EXPORT',
+    AUTOSAVE_DOWNLOAD_MESSAGE_TYPE: 'AUTOSAVE_DOWNLOAD_MARKDOWN'
   };
 
   // ============================================================================
@@ -920,6 +922,7 @@ ${code}\n\
       this.enabled = true;
       this.observer = null;
       this.exportInProgress = false;
+      this.runtimeMessageHandler = null;
     }
 
     init() {
@@ -928,6 +931,7 @@ ${code}\n\
       this.stateKey = this._buildStateKey();
       this.state = this._loadState();
       this._injectWidget();
+      this._registerRuntimeMessageHandler();
       this.lastComposerState = this._getComposerState();
       this._updateDetectionIndicators(this.lastComposerState);
       this._loadEnabledSetting(() => {
@@ -936,6 +940,55 @@ ${code}\n\
         this._scheduleMutationEvaluation();
       });
     }
+
+
+    _registerRuntimeMessageHandler() {
+      if (this.runtimeMessageHandler || typeof chrome === 'undefined' || !chrome.runtime?.onMessage) return;
+
+      this.runtimeMessageHandler = (message, sender, sendResponse) => {
+        if (message?.type !== CONFIG.AUTOSAVE_RUN_MESSAGE_TYPE) {
+          return false;
+        }
+
+        this._evaluateForExport({ force: false })
+          .then(() => sendResponse({ ok: true }))
+          .catch((error) => {
+            sendResponse({ ok: false, error: String(error?.message || error || 'Autosave failed') });
+          });
+
+        return true;
+      };
+
+      chrome.runtime.onMessage.addListener(this.runtimeMessageHandler);
+    }
+
+    _requestBackgroundDownload(markdown, filenameBase) {
+      return new Promise((resolve, reject) => {
+        if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+          reject(new Error('Background download unavailable.'));
+          return;
+        }
+
+        chrome.runtime.sendMessage({
+          type: CONFIG.AUTOSAVE_DOWNLOAD_MESSAGE_TYPE,
+          markdown,
+          filenameBase
+        }, (response) => {
+          if (chrome.runtime?.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+
+          if (!response?.ok) {
+            reject(new Error(response?.error || 'Background download failed.'));
+            return;
+          }
+
+          resolve(response);
+        });
+      });
+    }
+
 
     _loadEnabledSetting(onReady) {
       try {
@@ -1228,15 +1281,21 @@ ${code}\n\
           this.state.baselineTurns = turnCount;
           this._saveState();
           this._setWidgetState('notDownloaded');
+          return;
         }
-        return;
+
+        if (turnCount <= this.state.baselineTurns) {
+          return;
+        }
+
+        this.completionPending = true;
       }
 
       this._setWidgetState('waiting');
       this.exportInProgress = true;
 
       try {
-        const { markdown, turns } = await this.exportService.buildFullSnapshotMarkdown();
+        const { markdown, turns, conversationTitle } = await this.exportService.buildFullSnapshotMarkdown();
         if (!markdown || !turns.length) {
           this._setWidgetState('notDownloaded');
           return;
@@ -1249,17 +1308,12 @@ ${code}\n\
           return;
         }
 
-        // Trigger the exact same export path as the blue "Export Chat" flow,
-        // including its default filename generation behavior.
-        this.exportService.checkboxManager.injectCheckboxes();
-        document.querySelectorAll(`.${CONFIG.CHECKBOX_CLASS}`).forEach(cb => {
-          cb.checked = true;
-        });
+        const filenameBase = FilenameService.generate('', conversationTitle);
 
         try {
-          await this.exportService.execute('file', '');
-        } finally {
-          this.exportService.checkboxManager.removeAll();
+          await this._requestBackgroundDownload(markdown, filenameBase);
+        } catch (backgroundDownloadError) {
+          FileExportService.downloadMarkdown(markdown, filenameBase);
         }
 
         this.state.lastHash = hash;
