@@ -890,7 +890,7 @@ ${code}\n\
 
     _loadEnabledSetting(onReady) {
       try {
-        if (chrome?.storage?.sync) {
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync) {
           chrome.storage.sync.get([CONFIG.AUTOSAVE_ENABLED_STORAGE_KEY], (result) => {
             this.enabled = result[CONFIG.AUTOSAVE_ENABLED_STORAGE_KEY] !== false;
             this._updateWidgetLabel();
@@ -1288,7 +1288,7 @@ ${code}\n\
     observeStorageChanges() {
       const updateVisibility = () => {
         try {
-          if (chrome?.storage?.sync) {
+          if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync) {
             chrome.storage.sync.get(['hideExportBtn'], (result) => {
               this.button.style.display = result.hideExportBtn ? 'none' : '';
             });
@@ -1303,7 +1303,7 @@ ${code}\n\
       const observer = new MutationObserver(updateVisibility);
       observer.observe(document.body, { childList: true, subtree: true });
 
-      if (chrome?.storage?.onChanged) {
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
         chrome.storage.onChanged.addListener((changes, area) => {
           if (area === 'sync' && 'hideExportBtn' in changes) {
             updateVisibility();
