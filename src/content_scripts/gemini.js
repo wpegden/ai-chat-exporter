@@ -876,7 +876,6 @@ ${code}\n\
       this.mutationDebounceTimer = null;
       this.generationCompleteTimer = null;
       this.lastComposerState = { hasStop: false, hasMic: false };
-      this.sawStopSinceLastExport = false;
       this.detectionText = null;
       this.retryEvaluationTimer = null;
       this.lastDetectionSampleAt = 0;
@@ -1009,7 +1008,7 @@ ${code}\n\
       widget.appendChild(label);
 
       const detection = document.createElement('span');
-      detection.textContent = 'S:0 M:0 Seen:0 P:0';
+      detection.textContent = 'S:0 M:0 P:0';
       Object.assign(detection.style, {
         fontSize: '11px',
         opacity: '0.75'
@@ -1046,9 +1045,8 @@ ${code}\n\
       if (!this.detectionText) return;
       const stop = state?.hasStop ? '1' : '0';
       const mic = state?.hasMic ? '1' : '0';
-      const seen = this.sawStopSinceLastExport ? '1' : '0';
       const pending = this.completionPending ? '1' : '0';
-      this.detectionText.textContent = `S:${stop} M:${mic} Seen:${seen} P:${pending}`;
+      this.detectionText.textContent = `S:${stop} M:${mic} P:${pending}`;
     }
 
     _setWidgetState(state) {
@@ -1091,10 +1089,6 @@ ${code}\n\
 
         const previousState = this.lastComposerState;
         const currentState = this._getComposerState();
-
-        if (currentState.hasStop) {
-          this.sawStopSinceLastExport = true;
-        }
 
         const transitionedStopToNotStop = previousState.hasStop && !currentState.hasStop;
         if (transitionedStopToNotStop) {
@@ -1170,22 +1164,12 @@ ${code}\n\
       }
 
       const turnCount = this._getCurrentTurnCount();
-      if (!force && !this.sawStopSinceLastExport && !this.completionPending) {
-        return;
-      }
-      if (this.state.baselineTurns === null) {
-        this.state.baselineTurns = turnCount;
-        this._saveState();
-        this._setWidgetState('notDownloaded');
-        return;
-      }
 
-      if (!force && turnCount <= this.state.baselineTurns) {
-        if (!this.retryEvaluationTimer) {
-          this.retryEvaluationTimer = setTimeout(() => {
-            this.retryEvaluationTimer = null;
-            this._evaluateForExport();
-          }, 1500);
+      if (!force && !this.completionPending) {
+        if (this.state.baselineTurns === null) {
+          this.state.baselineTurns = turnCount;
+          this._saveState();
+          this._setWidgetState('notDownloaded');
         }
         return;
       }
@@ -1199,18 +1183,9 @@ ${code}\n\
           return;
         }
 
-        if (!force && turns.length <= this.state.baselineTurns) {
-          if (!this.retryEvaluationTimer) {
-            this.retryEvaluationTimer = setTimeout(() => {
-              this.retryEvaluationTimer = null;
-              this._evaluateForExport();
-            }, 1500);
-          }
-          return;
-        }
-
         const hash = `${turns.length}:${markdown.length}`;
         if (!force && hash === this.state.lastHash) {
+          this.completionPending = false;
           this._setWidgetState('downloaded');
           return;
         }
@@ -1223,8 +1198,7 @@ ${code}\n\
 
         this.state.lastHash = hash;
         this.state.nextIndex += 1;
-        this.sawStopSinceLastExport = false;
-          this.completionPending = false;
+            this.completionPending = false;
         this.state.baselineTurns = Math.max(this.state.baselineTurns || 0, turns.length);
         this._saveState();
         this._setWidgetState('downloaded');
