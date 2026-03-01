@@ -14,6 +14,7 @@
     SELECT_DROPDOWN_ID: 'gemini-select-dropdown',
     CHECKBOX_CLASS: 'gemini-export-checkbox',
     EXPORT_MODE_NAME: 'gemini-export-mode',
+    AUTOSAVE_WIDGET_ID: 'gemini-autosave-widget',
     
     SELECTORS: {
       CHAT_CONTAINER: '[data-test-id="chat-history-container"]',
@@ -30,7 +31,9 @@
       POPUP_DURATION: 900,
       NOTIFICATION_CLEANUP_DELAY: 1000,
       MAX_SCROLL_ATTEMPTS: 60,
-      MAX_STABLE_SCROLLS: 4
+      MAX_STABLE_SCROLLS: 4,
+      AUTOSAVE_MUTATION_DEBOUNCE: 1600,
+      AUTOSAVE_GENERATION_COMPLETE_DEBOUNCE: 1200
     },
     
     STYLES: {
@@ -49,13 +52,21 @@
     
     DEFAULT_FILENAME: 'gemini_chat_export',
     MARKDOWN_HEADER: '# Gemini Chat Export',
-    EXPORT_TIMESTAMP_FORMAT: 'Exported on:'
+    EXPORT_TIMESTAMP_FORMAT: 'Exported on:',
+    AUTOSAVE_STATE_PREFIX: 'ai_chat_exporter_autosave_state:',
+    AUTOSAVE_ENABLED_STORAGE_KEY: 'geminiAutosaveEnabled'
   };
 
   // ============================================================================
   // UTILITY SERVICES
   // ============================================================================
   
+
+  function isExtensionContextInvalidatedError(error) {
+    const message = String(error?.message || error || '');
+    return message.includes('Extension context invalidated');
+  }
+
   class DateUtils {
     static getDateString() {
       const d = new Date();
@@ -772,7 +783,8 @@ ${code}\n\
       return `# ${title}\n\n> ${CONFIG.EXPORT_TIMESTAMP_FORMAT} ${timestamp}\n\n---\n\n`;
     }
 
-    async buildMarkdown(turns, conversationTitle) {
+    async buildMarkdown(turns, conversationTitle, options = {}) {
+      const includeAll = !!options.includeAll;
       let markdown = this._buildMarkdownHeader(conversationTitle);
 
       for (let i = 0; i < turns.length; i++) {
@@ -783,7 +795,7 @@ ${code}\n\
         const userQueryElem = turn.querySelector(CONFIG.SELECTORS.USER_QUERY);
         if (userQueryElem) {
           const cb = userQueryElem.querySelector(`.${CONFIG.CHECKBOX_CLASS}`);
-          if (cb?.checked) {
+          if (includeAll || cb?.checked) {
             const userQuery = this.markdownConverter.extractUserQuery(userQueryElem);
             if (userQuery) {
               markdown += `## 👤 You\n\n${userQuery}\n\n`;
@@ -795,7 +807,7 @@ ${code}\n\
         const modelRespElem = turn.querySelector(CONFIG.SELECTORS.MODEL_RESPONSE);
         if (modelRespElem) {
           const cb = modelRespElem.querySelector(`.${CONFIG.CHECKBOX_CLASS}`);
-          if (cb?.checked) {
+          if (includeAll || cb?.checked) {
             const modelResponse = this.markdownConverter.extractModelResponse(modelRespElem);
             if (modelResponse) {
               markdown += `## 🤖 Gemini\n\n${modelResponse}\n\n`;
@@ -809,6 +821,14 @@ ${code}\n\
       }
 
       return markdown;
+    }
+
+    async buildFullSnapshotMarkdown() {
+      await ScrollService.loadAllMessages();
+      const turns = Array.from(document.querySelectorAll(CONFIG.SELECTORS.CONVERSATION_TURN));
+      const conversationTitle = FilenameService.getConversationTitle();
+      const markdown = await this.buildMarkdown(turns, conversationTitle, { includeAll: true });
+      return { markdown, turns, conversationTitle };
     }
 
     async execute(exportMode, customFilename) {
@@ -845,6 +865,350 @@ ${code}\n\
     }
   }
 
+  class GeminiAutosaveService {
+    constructor(exportService) {
+      this.exportService = exportService;
+      this.state = null;
+      this.stateKey = null;
+      this.widget = null;
+      this.statusText = null;
+      this.forceButton = null;
+      this.mutationDebounceTimer = null;
+      this.generationCompleteTimer = null;
+      this.lastComposerState = { hasStop: false, hasMic: false };
+      this.detectionText = null;
+      this.retryEvaluationTimer = null;
+      this.lastDetectionSampleAt = 0;
+      this.completionPending = false;
+      this.enabled = true;
+      this.observer = null;
+    }
+
+    init() {
+      if (location.hostname !== 'gemini.google.com') return;
+
+      this.stateKey = this._buildStateKey();
+      this.state = this._loadState();
+      this._injectWidget();
+      this.lastComposerState = this._getComposerState();
+      this._updateDetectionIndicators(this.lastComposerState);
+      this._loadEnabledSetting(() => {
+        this._setWidgetState('waiting');
+        this._observeDom();
+        this._scheduleMutationEvaluation();
+      });
+    }
+
+    _loadEnabledSetting(onReady) {
+      try {
+        if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.sync) {
+          chrome.storage.sync.get([CONFIG.AUTOSAVE_ENABLED_STORAGE_KEY], (result) => {
+            try {
+              if (chrome.runtime?.lastError) {
+              this.enabled = true;
+              this._updateWidgetLabel();
+                onReady();
+                return;
+              }
+
+              this.enabled = result?.[CONFIG.AUTOSAVE_ENABLED_STORAGE_KEY] !== false;
+              this._updateWidgetLabel();
+              onReady();
+            } catch (callbackError) {
+              if (!isExtensionContextInvalidatedError(callbackError)) {
+                console.error('Autosave settings read failed:', callbackError);
+              }
+              this.enabled = true;
+              this._updateWidgetLabel();
+              onReady();
+            }
+          });
+          return;
+        }
+      } catch (e) {
+        if (!isExtensionContextInvalidatedError(e)) {
+          console.error('Autosave settings read failed:', e);
+        }
+      }
+
+      this.enabled = true;
+      this._updateWidgetLabel();
+      onReady();
+    }
+
+    _buildStateKey() {
+      const pathMatch = location.pathname.match(/^\/app\/([^/?#]+)/);
+      const conversationKey = pathMatch?.[1] || location.href;
+      return `${CONFIG.AUTOSAVE_STATE_PREFIX}${conversationKey}`;
+    }
+
+    _loadState() {
+      try {
+        const raw = localStorage.getItem(this.stateKey);
+        if (!raw) {
+          return {
+            baseTitle: '',
+            nextIndex: 1,
+            lastHash: '',
+            baselineTurns: null
+          };
+        }
+
+        const parsed = JSON.parse(raw);
+        return {
+          baseTitle: parsed.baseTitle || '',
+          nextIndex: Number.isInteger(parsed.nextIndex) && parsed.nextIndex > 0 ? parsed.nextIndex : 1,
+          lastHash: parsed.lastHash || '',
+          baselineTurns: Number.isInteger(parsed.baselineTurns) ? parsed.baselineTurns : null
+        };
+      } catch (e) {
+        console.error('Autosave state parse failed:', e);
+        return {
+          baseTitle: '',
+          nextIndex: 1,
+          lastHash: '',
+          baselineTurns: null
+        };
+      }
+    }
+
+    _saveState() {
+      try {
+        localStorage.setItem(this.stateKey, JSON.stringify(this.state));
+      } catch (e) {
+        console.error('Autosave state save failed:', e);
+      }
+    }
+
+    _injectWidget() {
+      if (document.getElementById(CONFIG.AUTOSAVE_WIDGET_ID)) return;
+
+      const widget = document.createElement('div');
+      widget.id = CONFIG.AUTOSAVE_WIDGET_ID;
+      Object.assign(widget.style, {
+        position: 'fixed',
+        left: '16px',
+        bottom: '16px',
+        zIndex: '9999',
+        background: DOMUtils.isDarkMode() ? '#1c1c1c' : '#ffffff',
+        color: DOMUtils.isDarkMode() ? '#f3f3f3' : '#333333',
+        border: `1px solid ${DOMUtils.isDarkMode() ? '#3d3d3d' : '#d0d0d0'}`,
+        borderRadius: '8px',
+        padding: '8px 10px',
+        fontSize: '12px',
+        fontFamily: 'Arial, sans-serif',
+        boxShadow: '0 2px 10px rgba(0,0,0,0.12)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '8px'
+      });
+
+      const label = document.createElement('span');
+      label.textContent = 'Autosave: waiting';
+      widget.appendChild(label);
+
+      const detection = document.createElement('span');
+      detection.textContent = 'S:0 M:0 P:0';
+      Object.assign(detection.style, {
+        fontSize: '11px',
+        opacity: '0.75'
+      });
+      widget.appendChild(detection);
+
+      const forceBtn = document.createElement('button');
+      forceBtn.type = 'button';
+      forceBtn.textContent = 'Force';
+      Object.assign(forceBtn.style, {
+        padding: '2px 8px',
+        borderRadius: '6px',
+        border: '1px solid #7b7b7b',
+        background: 'transparent',
+        color: 'inherit',
+        cursor: 'pointer'
+      });
+      forceBtn.addEventListener('click', () => {
+        this._evaluateForExport({ force: true });
+      });
+
+      widget.appendChild(forceBtn);
+      document.body.appendChild(widget);
+
+      this.widget = widget;
+      this.statusText = label;
+      this.detectionText = detection;
+      this.forceButton = forceBtn;
+      this._updateWidgetLabel();
+    }
+
+
+    _updateDetectionIndicators(state) {
+      if (!this.detectionText) return;
+      const stop = state?.hasStop ? '1' : '0';
+      const mic = state?.hasMic ? '1' : '0';
+      const pending = this.completionPending ? '1' : '0';
+      this.detectionText.textContent = `S:${stop} M:${mic} P:${pending}`;
+    }
+
+    _setWidgetState(state) {
+      if (!this.statusText) return;
+
+      const labels = {
+        waiting: 'Autosave: waiting',
+        downloaded: 'Autosave: downloaded',
+        notDownloaded: 'Autosave: not downloaded',
+        disabled: 'Autosave: disabled'
+      };
+
+      this.statusText.textContent = labels[state] || labels.waiting;
+    }
+
+    _updateWidgetLabel() {
+      if (!this.enabled) {
+        this._setWidgetState('disabled');
+        return;
+      }
+
+      if (this.state?.lastHash) {
+        this._setWidgetState('downloaded');
+      } else {
+        this._setWidgetState('notDownloaded');
+      }
+    }
+
+    _observeDom() {
+      if (this.observer) this.observer.disconnect();
+
+      this.observer = new MutationObserver(() => {
+        this._scheduleMutationEvaluation();
+
+        const now = Date.now();
+        if (now - this.lastDetectionSampleAt < 120) {
+          return;
+        }
+        this.lastDetectionSampleAt = now;
+
+        const previousState = this.lastComposerState;
+        const currentState = this._getComposerState();
+
+        const transitionedStopToNotStop = previousState.hasStop && !currentState.hasStop;
+        if (transitionedStopToNotStop) {
+          this.completionPending = true;
+          this._scheduleGenerationCompletionEvaluation();
+        }
+
+        this.lastComposerState = currentState;
+        this._updateDetectionIndicators(currentState);
+      });
+
+      this.observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['aria-label', 'data-mat-icon-name', 'fonticon', 'class']
+      });
+    }
+
+    _scheduleMutationEvaluation() {
+      clearTimeout(this.mutationDebounceTimer);
+      this.mutationDebounceTimer = setTimeout(() => {
+        this._evaluateForExport();
+      }, CONFIG.TIMING.AUTOSAVE_MUTATION_DEBOUNCE);
+    }
+
+    _scheduleGenerationCompletionEvaluation() {
+      clearTimeout(this.generationCompleteTimer);
+      this.generationCompleteTimer = setTimeout(() => {
+        this._evaluateForExport();
+      }, CONFIG.TIMING.AUTOSAVE_GENERATION_COMPLETE_DEBOUNCE);
+    }
+
+    _getCurrentTurnCount() {
+      return document.querySelectorAll(CONFIG.SELECTORS.CONVERSATION_TURN).length;
+    }
+
+    _getComposerState() {
+      const stopButtonByLabel = document.querySelector('button[aria-label*="Stop" i], button[mattooltip*="Stop" i]');
+      const stopIcon = document.querySelector('mat-icon[fonticon="stop"], mat-icon[fonticon="stop_circle"], mat-icon[data-mat-icon-name="stop"], mat-icon[data-mat-icon-name="stop_circle"]');
+      const stopButtonByIcon = stopIcon?.closest('button');
+
+      const micButtonByLabel = document.querySelector('button[aria-label*="Microphone" i], button[mattooltip*="Microphone" i]');
+      const micIcon = document.querySelector('mat-icon[fonticon="mic"], mat-icon[data-mat-icon-name="mic"]');
+      const micButtonByIcon = micIcon?.closest('button');
+
+      return {
+        hasStop: !!stopButtonByLabel || !!stopButtonByIcon,
+        hasMic: !!micButtonByLabel || !!micButtonByIcon
+      };
+    }
+
+    _isGenerationOngoing() {
+      return this._getComposerState().hasStop;
+    }
+
+    _getOrCreateBaseTitle(currentTitle) {
+      if (this.state.baseTitle) return this.state.baseTitle;
+
+      const sanitized = StringUtils.sanitizeFilename(currentTitle || '') || CONFIG.DEFAULT_FILENAME;
+      this.state.baseTitle = sanitized;
+      this._saveState();
+      return this.state.baseTitle;
+    }
+
+    async _evaluateForExport(options = {}) {
+      const force = !!options.force;
+
+      if (!this.enabled) return;
+      if (!force && this._isGenerationOngoing()) {
+        this._setWidgetState('waiting');
+        return;
+      }
+
+      const turnCount = this._getCurrentTurnCount();
+
+      if (!force && !this.completionPending) {
+        if (this.state.baselineTurns === null) {
+          this.state.baselineTurns = turnCount;
+          this._saveState();
+          this._setWidgetState('notDownloaded');
+        }
+        return;
+      }
+
+      this._setWidgetState('waiting');
+
+      try {
+        const { markdown, turns, conversationTitle } = await this.exportService.buildFullSnapshotMarkdown();
+        if (!markdown || !turns.length) {
+          this._setWidgetState('notDownloaded');
+          return;
+        }
+
+        const hash = `${turns.length}:${markdown.length}`;
+        if (!force && hash === this.state.lastHash) {
+          this.completionPending = false;
+          this._setWidgetState('downloaded');
+          return;
+        }
+
+        const baseTitle = this._getOrCreateBaseTitle(conversationTitle);
+        const sequence = String(this.state.nextIndex).padStart(2, '0');
+        const filename = `${baseTitle}-${sequence}`;
+
+        FileExportService.downloadMarkdown(markdown, filename);
+
+        this.state.lastHash = hash;
+        this.state.nextIndex += 1;
+            this.completionPending = false;
+        this.state.baselineTurns = Math.max(this.state.baselineTurns || 0, turns.length);
+        this._saveState();
+        this._setWidgetState('downloaded');
+      } catch (error) {
+        console.error('Gemini autosave export failed:', error);
+        this._setWidgetState('notDownloaded');
+      }
+    }
+  }
+
   // ============================================================================
   // EXPORT CONTROLLER
   // ============================================================================
@@ -855,12 +1219,14 @@ ${code}\n\
       this.exportService = new ExportService(this.checkboxManager);
       this.button = null;
       this.dropdown = null;
+      this.autosaveService = new GeminiAutosaveService(this.exportService);
     }
 
     init() {
       this.createUI();
       this.attachEventListeners();
       this.observeStorageChanges();
+      this.autosaveService.init();
     }
 
     createUI() {
@@ -963,22 +1329,29 @@ ${code}\n\
     observeStorageChanges() {
       const updateVisibility = () => {
         try {
-          if (chrome?.storage?.sync) {
-            chrome.storage.sync.get(['hideExportBtn'], (result) => {
-              this.button.style.display = result.hideExportBtn ? 'none' : '';
-            });
-          }
+          if (typeof chrome === 'undefined' || !chrome.storage || !chrome.storage.sync) return;
+
+          chrome.storage.sync.get(['hideExportBtn'], (result) => {
+            try {
+              if (chrome.runtime?.lastError) return;
+              if (!this.button?.isConnected) return;
+              this.button.style.display = result?.hideExportBtn ? 'none' : '';
+            } catch (callbackError) {
+              if (!isExtensionContextInvalidatedError(callbackError)) {
+                console.error('Storage access error:', callbackError);
+              }
+            }
+          });
         } catch (e) {
-          console.error('Storage access error:', e);
+          if (!isExtensionContextInvalidatedError(e)) {
+            console.error('Storage access error:', e);
+          }
         }
       };
 
       updateVisibility();
 
-      const observer = new MutationObserver(updateVisibility);
-      observer.observe(document.body, { childList: true, subtree: true });
-
-      if (chrome?.storage?.onChanged) {
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
         chrome.storage.onChanged.addListener((changes, area) => {
           if (area === 'sync' && 'hideExportBtn' in changes) {
             updateVisibility();
