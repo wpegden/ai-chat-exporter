@@ -877,7 +877,6 @@ ${code}\n\
       this.generationCompleteTimer = null;
       this.lastComposerState = { hasStop: false, hasMic: false };
       this.sawStopSinceLastExport = false;
-      this.stableMicSamples = 0;
       this.detectionText = null;
       this.retryEvaluationTimer = null;
       this.lastDetectionSampleAt = 0;
@@ -1095,22 +1094,11 @@ ${code}\n\
 
         if (currentState.hasStop) {
           this.sawStopSinceLastExport = true;
-          this.stableMicSamples = 0;
-        }
-
-        if (this.sawStopSinceLastExport && !currentState.hasStop) {
-          this.completionPending = true;
-        }
-
-        if (this.sawStopSinceLastExport && !currentState.hasStop && currentState.hasMic) {
-          this.stableMicSamples += 1;
-        } else {
-          this.stableMicSamples = 0;
         }
 
         const transitionedStopToNotStop = previousState.hasStop && !currentState.hasStop;
-
-        if (transitionedStopToNotStop || this.completionPending || this.stableMicSamples >= 3) {
+        if (transitionedStopToNotStop) {
+          this.completionPending = true;
           this._scheduleGenerationCompletionEvaluation();
         }
 
@@ -1236,8 +1224,7 @@ ${code}\n\
         this.state.lastHash = hash;
         this.state.nextIndex += 1;
         this.sawStopSinceLastExport = false;
-        this.stableMicSamples = 0;
-        this.completionPending = false;
+          this.completionPending = false;
         this.state.baselineTurns = Math.max(this.state.baselineTurns || 0, turns.length);
         this._saveState();
         this._setWidgetState('downloaded');
