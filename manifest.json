@@ -5,7 +5,10 @@
   "version": "4.0.1",
   "permissions": [
     "clipboardRead",
-    "storage"
+    "storage",
+    "alarms",
+    "downloads",
+    "tabs"
   ],
   "host_permissions": [
   "https://gemini.google.com/*",
@@ -30,5 +33,8 @@
   ],
   "action": {
     "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "src/background.js"
   }
 }
